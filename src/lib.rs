@@ -171,6 +171,82 @@ impl<'a> Executor<'a> {
         task
     }
 
+    /// Spawns many tasks onto the executor.
+    /// 
+    /// As opposed to the [`spawn`] method, this locks the executor's inner task lock once and
+    /// spawns all of the tasks in one go. With large amounts of tasks this can improve
+    /// contention.
+    /// 
+    /// For very large numbers of tasks the lock is occasionally dropped and re-acquired to
+    /// prevent runner thread starvation. It is assumed that the iterator provided does not
+    /// block; blocking iterators can lock up the internal mutex and therefore the entire
+    /// executor.
+    /// 
+    /// ## Example
+    /// 
+    /// ```
+    /// use async_executor::Executor;
+    /// use futures_lite::{stream, prelude::*};
+    /// use std::future::ready;
+    /// 
+    /// # futures_lite::future::block_on(async {
+    /// let mut ex = Executor::new();
+    /// 
+    /// let futures = [
+    ///     ready(1),
+    ///     ready(2),
+    ///     ready(3)
+    /// ];
+    /// 
+    /// // Spawn all of the futures onto the executor at once.
+    /// let mut tasks = vec![];
+    /// ex.spawn_many(futures, &mut tasks);
+    /// 
+    /// // Await all of them.
+    /// let results = ex.run(async move {
+    ///     stream::iter(tasks).then(|x| x).collect::<Vec<_>>().await
+    /// }).await;
+    /// assert_eq!(results, [1, 2, 3]);
+    /// # });
+    /// ```
+    /// 
+    /// [`spawn`]: Executor::spawn
+    pub fn spawn_many<T: Send + 'a, F: Future<Output = T> + Send + 'a>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+        handles: &mut impl Extend<Task<F::Output>>
+    ) {
+        let mut active = self.state().active.lock().unwrap();
+
+        for (i, future) in futures.into_iter().enumerate() {
+            // Remove the task from the set of active tasks when the future finishes.
+            let index = active.vacant_entry().key();
+            let state = self.state().clone();
+            let future = async move {
+                let _guard =
+                    CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
+                future.await
+            };
+
+            // Create the task and register it in the set of active tasks.
+            let (runnable, task) = unsafe {
+                Builder::new()
+                    .propagate_panic(true)
+                    .spawn_unchecked(|()| future, self.schedule())
+            };
+            active.insert(runnable.waker());
+
+            runnable.schedule();
+            handles.extend(Some(task));
+
+            // Yield the lock every once in a while to ease contention.
+            if i.wrapping_sub(1) % 500 == 0 {
+                drop(active);
+                active = self.state().active.lock().unwrap();
+            }
+        }
+    }
+
     /// Attempts to run a task if at least one is scheduled.
     ///
     /// Running a scheduled task means simply polling its future once.
@@ -417,6 +493,76 @@ impl<'a> LocalExecutor<'a> {
 
         runnable.schedule();
         task
+    }
+
+    /// Spawns many tasks onto the executor.
+    /// 
+    /// As opposed to the [`spawn`] method, this locks the executor's inner task lock once and
+    /// spawns all of the tasks in one go. With large amounts of tasks this can improve
+    /// contention.
+    /// 
+    /// It is assumed that the iterator provided does not block; blocking iterators can lock up
+    /// the internal mutex and therefore the entire executor. Unlike [`Executor::spawn`], the
+    /// mutex is not released, as there are no other threads that can poll this executor.
+    /// 
+    /// ## Example
+    /// 
+    /// ```
+    /// use async_executor::LocalExecutor;
+    /// use futures_lite::{stream, prelude::*};
+    /// use std::future::ready;
+    /// 
+    /// # futures_lite::future::block_on(async {
+    /// let mut ex = LocalExecutor::new();
+    /// 
+    /// let futures = [
+    ///     ready(1),
+    ///     ready(2),
+    ///     ready(3)
+    /// ];
+    /// 
+    /// // Spawn all of the futures onto the executor at once.
+    /// let mut tasks = vec![];
+    /// ex.spawn_many(futures, &mut tasks);
+    /// 
+    /// // Await all of them.
+    /// let results = ex.run(async move {
+    ///     stream::iter(tasks).then(|x| x).collect::<Vec<_>>().await
+    /// }).await;
+    /// assert_eq!(results, [1, 2, 3]);
+    /// # });
+    /// ```
+    /// 
+    /// [`spawn`]: LocalExecutor::spawn
+    /// [`Executor::spawn_many`]: Executor::spawn_many
+    pub fn spawn_many<T: Send + 'a, F: Future<Output = T> + Send + 'a>(
+        &self,
+        futures: impl IntoIterator<Item = F>,
+        handles: &mut impl Extend<Task<F::Output>>
+    ) {
+        let mut active = self.inner().state().active.lock().unwrap();
+
+        for future in futures {
+            // Remove the task from the set of active tasks when the future finishes.
+            let index = active.vacant_entry().key();
+            let state = self.inner().state().clone();
+            let future = async move {
+                let _guard =
+                    CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
+                future.await
+            };
+
+            // Create the task and register it in the set of active tasks.
+            let (runnable, task) = unsafe {
+                Builder::new()
+                    .propagate_panic(true)
+                    .spawn_unchecked(|()| future, self.schedule())
+            };
+            active.insert(runnable.waker());
+
+            runnable.schedule();
+            handles.extend(Some(task));
+        }
     }
 
     /// Attempts to run a task if at least one is scheduled.
@@ -938,6 +1084,17 @@ fn debug_executor(executor: &Executor<'_>, name: &str, f: &mut fmt::Formatter<'_
         .field("local_runners", &LocalRunners(&state.local_queues))
         .field("sleepers", &SleepCount(&state.sleepers))
         .finish()
+}
+
+/// Container with one item.
+/// 
+/// This implements `Extend` for one-off cases.
+struct Container<T>(Option<T>);
+
+impl<T> Extend<T> for Container<T> {
+    fn extend<X: IntoIterator<Item = T>>(&mut self, iter: X) {
+        self.0 = iter.into_iter().next();
+    }
 }
 
 /// Runs a closure when dropped.
