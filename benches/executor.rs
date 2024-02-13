@@ -58,10 +58,7 @@ fn running_benches(c: &mut Criterion) {
                     let mut handles = vec![];
 
                     b.iter(|| {
-                        EX.spawn_many(
-                            (0..250).map(|_| future::yield_now()),
-                            &mut handles
-                        );
+                        EX.spawn_many((0..250).map(|_| future::yield_now()), &mut handles);
                     });
 
                     handles.clear();

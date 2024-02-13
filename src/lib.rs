@@ -172,36 +172,36 @@ impl<'a> Executor<'a> {
     }
 
     /// Spawns many tasks onto the executor.
-    /// 
+    ///
     /// As opposed to the [`spawn`] method, this locks the executor's inner task lock once and
     /// spawns all of the tasks in one go. With large amounts of tasks this can improve
     /// contention.
-    /// 
+    ///
     /// For very large numbers of tasks the lock is occasionally dropped and re-acquired to
     /// prevent runner thread starvation. It is assumed that the iterator provided does not
     /// block; blocking iterators can lock up the internal mutex and therefore the entire
     /// executor.
-    /// 
+    ///
     /// ## Example
-    /// 
+    ///
     /// ```
     /// use async_executor::Executor;
     /// use futures_lite::{stream, prelude::*};
     /// use std::future::ready;
-    /// 
+    ///
     /// # futures_lite::future::block_on(async {
     /// let mut ex = Executor::new();
-    /// 
+    ///
     /// let futures = [
     ///     ready(1),
     ///     ready(2),
     ///     ready(3)
     /// ];
-    /// 
+    ///
     /// // Spawn all of the futures onto the executor at once.
     /// let mut tasks = vec![];
     /// ex.spawn_many(futures, &mut tasks);
-    /// 
+    ///
     /// // Await all of them.
     /// let results = ex.run(async move {
     ///     stream::iter(tasks).then(|x| x).collect::<Vec<_>>().await
@@ -209,12 +209,12 @@ impl<'a> Executor<'a> {
     /// assert_eq!(results, [1, 2, 3]);
     /// # });
     /// ```
-    /// 
+    ///
     /// [`spawn`]: Executor::spawn
     pub fn spawn_many<T: Send + 'a, F: Future<Output = T> + Send + 'a>(
         &self,
         futures: impl IntoIterator<Item = F>,
-        handles: &mut impl Extend<Task<F::Output>>
+        handles: &mut impl Extend<Task<F::Output>>,
     ) {
         let mut active = self.state().active.lock().unwrap();
 
@@ -496,35 +496,35 @@ impl<'a> LocalExecutor<'a> {
     }
 
     /// Spawns many tasks onto the executor.
-    /// 
+    ///
     /// As opposed to the [`spawn`] method, this locks the executor's inner task lock once and
     /// spawns all of the tasks in one go. With large amounts of tasks this can improve
     /// contention.
-    /// 
+    ///
     /// It is assumed that the iterator provided does not block; blocking iterators can lock up
     /// the internal mutex and therefore the entire executor. Unlike [`Executor::spawn`], the
     /// mutex is not released, as there are no other threads that can poll this executor.
-    /// 
+    ///
     /// ## Example
-    /// 
+    ///
     /// ```
     /// use async_executor::LocalExecutor;
     /// use futures_lite::{stream, prelude::*};
     /// use std::future::ready;
-    /// 
+    ///
     /// # futures_lite::future::block_on(async {
     /// let mut ex = LocalExecutor::new();
-    /// 
+    ///
     /// let futures = [
     ///     ready(1),
     ///     ready(2),
     ///     ready(3)
     /// ];
-    /// 
+    ///
     /// // Spawn all of the futures onto the executor at once.
     /// let mut tasks = vec![];
     /// ex.spawn_many(futures, &mut tasks);
-    /// 
+    ///
     /// // Await all of them.
     /// let results = ex.run(async move {
     ///     stream::iter(tasks).then(|x| x).collect::<Vec<_>>().await
@@ -532,13 +532,13 @@ impl<'a> LocalExecutor<'a> {
     /// assert_eq!(results, [1, 2, 3]);
     /// # });
     /// ```
-    /// 
+    ///
     /// [`spawn`]: LocalExecutor::spawn
     /// [`Executor::spawn_many`]: Executor::spawn_many
     pub fn spawn_many<T: Send + 'a, F: Future<Output = T> + Send + 'a>(
         &self,
         futures: impl IntoIterator<Item = F>,
-        handles: &mut impl Extend<Task<F::Output>>
+        handles: &mut impl Extend<Task<F::Output>>,
     ) {
         let mut active = self.inner().state().active.lock().unwrap();
 
@@ -1087,7 +1087,7 @@ fn debug_executor(executor: &Executor<'_>, name: &str, f: &mut fmt::Formatter<'_
 }
 
 /// Container with one item.
-/// 
+///
 /// This implements `Extend` for one-off cases.
 struct Container<T>(Option<T>);
 
