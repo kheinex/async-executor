@@ -150,25 +150,8 @@ impl<'a> Executor<'a> {
     pub fn spawn<T: Send + 'a>(&self, future: impl Future<Output = T> + Send + 'a) -> Task<T> {
         let mut active = self.state().active.lock().unwrap();
 
-        // Remove the task from the set of active tasks when the future finishes.
-        let entry = active.vacant_entry();
-        let index = entry.key();
-        let state = self.state().clone();
-        let future = async move {
-            let _guard = CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
-            future.await
-        };
-
-        // Create the task and register it in the set of active tasks.
-        let (runnable, task) = unsafe {
-            Builder::new()
-                .propagate_panic(true)
-                .spawn_unchecked(|()| future, self.schedule())
-        };
-        entry.insert(runnable.waker());
-
-        runnable.schedule();
-        task
+        // SAFETY: `T` and the future are `Send`.
+        unsafe { self.spawn_inner(future, &mut active) }
     }
 
     /// Spawns many tasks onto the executor.
@@ -219,25 +202,8 @@ impl<'a> Executor<'a> {
         let mut active = self.state().active.lock().unwrap();
 
         for (i, future) in futures.into_iter().enumerate() {
-            // Remove the task from the set of active tasks when the future finishes.
-            let index = active.vacant_entry().key();
-            let state = self.state().clone();
-            let future = async move {
-                let _guard =
-                    CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
-                future.await
-            };
-
-            // Create the task and register it in the set of active tasks.
-            let (runnable, task) = unsafe {
-                Builder::new()
-                    .propagate_panic(true)
-                    .spawn_unchecked(|()| future, self.schedule())
-            };
-            active.insert(runnable.waker());
-
-            runnable.schedule();
-            handles.extend(Some(task));
+            // SAFETY: `T` and the future are `Send`.
+            handles.extend(Some(unsafe { self.spawn_inner(future, &mut active) }));
 
             // Yield the lock every once in a while to ease contention.
             if i.wrapping_sub(1) % 500 == 0 {
@@ -245,6 +211,37 @@ impl<'a> Executor<'a> {
                 active = self.state().active.lock().unwrap();
             }
         }
+    }
+
+    /// Spawn a future using the inner lock.
+    ///
+    /// # Safety
+    ///
+    /// If this is an `Executor`, `F` and `T` must be `Send`.
+    unsafe fn spawn_inner<T: 'a>(
+        &self,
+        future: impl Future<Output = T> + 'a,
+        active: &mut Slab<Waker>,
+    ) -> Task<T> {
+        // Remove the task from the set of active tasks when the future finishes.
+        let entry = active.vacant_entry();
+        let index = entry.key();
+        let state = self.state().clone();
+        let future = async move {
+            let _guard = CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
+            future.await
+        };
+
+        // Create the task and register it in the set of active tasks.
+        let (runnable, task) = unsafe {
+            Builder::new()
+                .propagate_panic(true)
+                .spawn_unchecked(|()| future, self.schedule())
+        };
+        entry.insert(runnable.waker());
+
+        runnable.schedule();
+        task
     }
 
     /// Attempts to run a task if at least one is scheduled.
@@ -474,25 +471,9 @@ impl<'a> LocalExecutor<'a> {
     pub fn spawn<T: 'a>(&self, future: impl Future<Output = T> + 'a) -> Task<T> {
         let mut active = self.inner().state().active.lock().unwrap();
 
-        // Remove the task from the set of active tasks when the future finishes.
-        let entry = active.vacant_entry();
-        let index = entry.key();
-        let state = self.inner().state().clone();
-        let future = async move {
-            let _guard = CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
-            future.await
-        };
-
-        // Create the task and register it in the set of active tasks.
-        let (runnable, task) = unsafe {
-            Builder::new()
-                .propagate_panic(true)
-                .spawn_unchecked(|()| future, self.schedule())
-        };
-        entry.insert(runnable.waker());
-
-        runnable.schedule();
-        task
+        // SAFETY: This executor is not thread safe, so the future and its result
+        //         cannot be sent to another thread.
+        unsafe { self.inner().spawn_inner(future, &mut active) }
     }
 
     /// Spawns many tasks onto the executor.
@@ -542,27 +523,20 @@ impl<'a> LocalExecutor<'a> {
     ) {
         let mut active = self.inner().state().active.lock().unwrap();
 
-        for future in futures {
-            // Remove the task from the set of active tasks when the future finishes.
-            let index = active.vacant_entry().key();
-            let state = self.inner().state().clone();
-            let future = async move {
-                let _guard =
-                    CallOnDrop(move || drop(state.active.lock().unwrap().try_remove(index)));
-                future.await
-            };
+        // Convert all of the futures to tasks.
+        let tasks = futures.into_iter().map(|future| {
+            // SAFETY: This executor is not thread safe, so the future and its result
+            //         cannot be sent to another thread.
+            unsafe {
+                self.inner().spawn_inner(future, &mut active)
+            }
 
-            // Create the task and register it in the set of active tasks.
-            let (runnable, task) = unsafe {
-                Builder::new()
-                    .propagate_panic(true)
-                    .spawn_unchecked(|()| future, self.schedule())
-            };
-            active.insert(runnable.waker());
+            // As only one thread can spawn or poll tasks at a time, there is no need
+            // to release lock contention here.
+        });
 
-            runnable.schedule();
-            handles.extend(Some(task));
-        }
+        // Push them to the user's collection.
+        handles.extend(tasks); 
     }
 
     /// Attempts to run a task if at least one is scheduled.
