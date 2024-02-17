@@ -1,6 +1,11 @@
 use async_executor::{Executor, LocalExecutor};
 use futures_lite::future;
 
+#[cfg(not(miri))]
+const READY_COUNT: usize = 50_000;
+#[cfg(miri)]
+const READY_COUNT: usize = 505;
+
 #[test]
 fn spawn_many() {
     future::block_on(async {
@@ -8,7 +13,7 @@ fn spawn_many() {
 
         // Spawn a lot of tasks.
         let mut tasks = vec![];
-        ex.spawn_many((0..50_000).map(future::ready), &mut tasks);
+        ex.spawn_many((0..READY_COUNT).map(future::ready), &mut tasks);
 
         // Run all of the tasks in parallel.
         ex.run(async move {
@@ -27,7 +32,7 @@ fn spawn_many_local() {
 
         // Spawn a lot of tasks.
         let mut tasks = vec![];
-        ex.spawn_many((0..50_000).map(future::ready), &mut tasks);
+        ex.spawn_many((0..READY_COUNT).map(future::ready), &mut tasks);
 
         // Run all of the tasks in parallel.
         ex.run(async move {
