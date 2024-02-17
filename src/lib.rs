@@ -199,21 +199,27 @@ impl<'a> Executor<'a> {
         futures: impl IntoIterator<Item = F>,
         handles: &mut impl Extend<Task<F::Output>>,
     ) {
-        let mut active = self.state().active.lock().unwrap();
+        let mut active = Some(self.state().active.lock().unwrap());
 
-        for (i, future) in futures.into_iter().enumerate() {
+        // Convert the futures into tasks.
+        let tasks = futures.into_iter().enumerate().map(move |(i, future)| {
             // SAFETY: `T` and the future are `Send`.
-            handles.extend(Some(unsafe { self.spawn_inner(future, &mut active) }));
+            let task = unsafe { self.spawn_inner(future, active.as_mut().unwrap()) };
 
             // Yield the lock every once in a while to ease contention.
             if i.wrapping_sub(1) % 500 == 0 {
-                drop(active);
-                active = self.state().active.lock().unwrap();
+                drop(active.take());
+                active = Some(self.state().active.lock().unwrap());
             }
-        }
+
+            task
+        });
+
+        // Push the tasks to the user's collection.
+        handles.extend(tasks);
     }
 
-    /// Spawn a future using the inner lock.
+    /// Spawn a future while holding the inner lock.
     ///
     /// # Safety
     ///
@@ -527,16 +533,14 @@ impl<'a> LocalExecutor<'a> {
         let tasks = futures.into_iter().map(|future| {
             // SAFETY: This executor is not thread safe, so the future and its result
             //         cannot be sent to another thread.
-            unsafe {
-                self.inner().spawn_inner(future, &mut active)
-            }
+            unsafe { self.inner().spawn_inner(future, &mut active) }
 
             // As only one thread can spawn or poll tasks at a time, there is no need
             // to release lock contention here.
         });
 
         // Push them to the user's collection.
-        handles.extend(tasks); 
+        handles.extend(tasks);
     }
 
     /// Attempts to run a task if at least one is scheduled.
@@ -600,16 +604,6 @@ impl<'a> LocalExecutor<'a> {
     /// ```
     pub async fn run<T>(&self, future: impl Future<Output = T>) -> T {
         self.inner().run(future).await
-    }
-
-    /// Returns a function that schedules a runnable task when it gets woken up.
-    fn schedule(&self) -> impl Fn(Runnable) + Send + Sync + 'static {
-        let state = self.inner().state().clone();
-
-        move |runnable| {
-            state.queue.push(runnable).unwrap();
-            state.notify();
-        }
     }
 
     /// Returns a reference to the inner executor.
@@ -1058,17 +1052,6 @@ fn debug_executor(executor: &Executor<'_>, name: &str, f: &mut fmt::Formatter<'_
         .field("local_runners", &LocalRunners(&state.local_queues))
         .field("sleepers", &SleepCount(&state.sleepers))
         .finish()
-}
-
-/// Container with one item.
-///
-/// This implements `Extend` for one-off cases.
-struct Container<T>(Option<T>);
-
-impl<T> Extend<T> for Container<T> {
-    fn extend<X: IntoIterator<Item = T>>(&mut self, iter: X) {
-        self.0 = iter.into_iter().next();
-    }
 }
 
 /// Runs a closure when dropped.
