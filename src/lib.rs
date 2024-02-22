@@ -391,7 +391,7 @@ impl<'a> Executor<'a> {
 impl Drop for Executor<'_> {
     fn drop(&mut self) {
         if let Some(state) = self.state.get() {
-            let mut active = state.active.lock().unwrap();
+            let mut active = state.active.lock().unwrap_or_else(|e| e.into_inner());
             for w in active.drain() {
                 w.wake();
             }
